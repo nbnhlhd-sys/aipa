@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-宸赋智控智控系统 - 多工序生产排控平台
+宸赋智控系统 - 多工序生产排控平台
 技术栈：Streamlit + SQLite + Pandas
 AIPA = Advanced-Intelligent Production Administration（高级智能生产管控）
 """
@@ -510,7 +510,7 @@ def backup_master_excel(conn):
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         pd.DataFrame([
-            ["用途", "AIPA智控系统基础资料备份文件"],
+            ["用途", "宸赋智控系统基础资料备份文件"],
             ["规则", "每个工作表(sheet)对应一张表，表头为数据库英文字段，请勿修改/删除表头行"],
             ["编辑", "可在数据行增删改内容，保存后可在系统设置→数据备份恢复中导回"],
         ], columns=["项目", "说明"]).to_excel(writer, sheet_name="说明", index=False)
@@ -2188,7 +2188,7 @@ def page_dashboard(conn):
 # 登录界面
 # ============================================================
 def login_page(conn):
-    st.markdown("<h1 style='text-align:center; margin-top:80px;'>AIPA智控系统</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align:center; margin-top:80px;'>宸赋智控系统</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center; color:#888; font-size:16px;'>多工序生产排控平台</p>", unsafe_allow_html=True)
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -2220,7 +2220,7 @@ def login_page(conn):
 # 主函数
 # ============================================================
 def main():
-    st.set_page_config(page_title="AIPA智控系统", layout="wide")
+    st.set_page_config(page_title="宸赋智控系统", layout="wide")
     conn = get_conn()
     init_db(conn)
 
@@ -2244,7 +2244,7 @@ def main():
         conn.close()
         return
 
-    st.sidebar.title("AIPA智控系统")
+    st.sidebar.title("宸赋智控系统")
     st.sidebar.caption(f"用户：{st.session_state.username}（{st.session_state.user_role}）")
     if st.session_state.user_workshop:
         st.sidebar.caption(f"车间：{st.session_state.user_workshop}")
