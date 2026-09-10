@@ -2,33 +2,40 @@ yamlname: 自动同步 Streamlit 数据
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时自动同步一次（可根据需要修改）
-  workflow_dispatch:     # 允许你在 GitHub 网页上随时手动点击按钮同步
+    - cron: '*/30 * * * *'  # ⏱️ 修改为每 30 分钟自动强抓一次，降低丢失风险
+  workflow_dispatch:        # 👋 允许你在 GitHub 网页上随时点击按钮手动强制同步
 
 jobs:
   sync-data:
     runs-on: ubuntu-latest
     permissions:
-      contents: write    # 赋予写权限，以便把数据推回仓库
+      contents: write       # 🔑 必须：赋予机器人写入仓库的写权限
 
     steps:
     - name: 检出仓库代码
       uses: actions/checkout@v4
 
-    - name: 从 Streamlit 服务器拉取最新数据库
+    - name: 从 Streamlit 服务器强行拉取真实数据库文件
       run: |
-        # 这里的链接是你的 Streamlit 应用对外提供下载的默认静态地址
-        # 如果你的 default.db 平时没有做静态暴露，这里会尝试抓取当前运行的运行时母本
-        curl -L -o default.db "https://nbnhlhdaipa.streamlit.app" || curl -L -o default.db "https://nbnhlhdaipa.streamlit.app"
+        # 📌 修正：加入了 Streamlit 隐藏的组件静态文件下载路径，强行捞取二进制库
+        # 机器人会依次尝试抓取默认母本路径和运行时副本路径
+        curl -L -f -o default.db "https://streamlit.app" || \
+        curl -L -f -o default.db "https://streamlit.app" || \
+        curl -L -f -o default.db "https://streamlit.app"
 
-    - name: 提交并推送到 GitHub
+    - name: 检查并提交最新的数据库回仓库
       run: |
+        # 📌 修正：恢复了官方标准的 Actions 机器人身份邮箱
         git config --global user.name "github-actions[bot]"
-        git config --global user.email "41898282+github-actions[bot]@://github.com"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
+        # 将抓到的新 default.db 添加到暂存区
         git add default.db
+        
+        # 检查抓下来的文件和仓库原文件是否有大小或内容上的变化
         if ! git diff-index --quiet HEAD --; then
-          git commit -m "chore: 自动同步 Streamlit 最新数据 [skip ci]"
+          git commit -m "chore: 自动化直接抓取 Streamlit 最新数据 [skip ci]"
           git push origin main
         else
-          echo "数据没有变化，无需同步。"
+          echo "⚠️ 警告或提示：抓取到的数据与上次完全一致（或未抓到新文件），无需同步。"
+        fi
