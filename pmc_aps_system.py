@@ -2617,7 +2617,26 @@ def main():
             else:
                 st.sidebar.error(_msg)
         else:
-            st.sidebar.warning("未配置 GitHub Secrets，数据只存在本次运行，重启会丢")
+            st.sidebar.warning("未配置 GitHub，数据只存在本次运行，重启会丢")
+    # 从 GitHub 拉取最新数据（重启后数据不见了，点这个恢复）
+    if st.sidebar.button("从GitHub同步最新数据", width="stretch"):
+        _cfg = get_github_config()
+        if _cfg:
+            _o, _r, _b, _p, _t = _cfg
+            with st.spinner("正在从云端同步..."):
+                _data, _msg = pull_db_from_github(_t, _o, _r, _b, _p)
+                if _data is not None:
+                    try:
+                        restore_db_file(conn, _data)
+                        st.sidebar.success(f"已恢复最新数据（{len(_data)/1024:.1f} KB），正在刷新...")
+                        time.sleep(0.8)
+                        st.rerun()
+                    except Exception as e:
+                        st.sidebar.error(f"恢复失败：{e}")
+                else:
+                    st.sidebar.error(_msg)
+        else:
+            st.sidebar.warning("未配置 GitHub，无法同步")
     if st.sidebar.button("退出登录", width="stretch"):
         for k in ["logged_in", "user_id", "username", "user_role", "user_workshop"]:
             st.session_state.pop(k, None)
