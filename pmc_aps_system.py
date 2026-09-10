@@ -3,7 +3,6 @@
 """
 宸赋智控系统 - 多工序生产排控平台
 技术栈：Streamlit + SQLite + Pandas
-AIPA = Advanced-Intelligent Production Administration（高级智能生产管控）
 """
 import streamlit as st
 import pandas as pd
@@ -13,23 +12,8 @@ from io import BytesIO
 import os
 import time
 import tempfile
-import shutil
-# GitHub仓库基准模板库，本地pmc_aps.db复制一份重命名为 default_pmc_aps.db上传仓库根目录
-DEFAULT_DB_PATH = "default_pmc_aps.db"
-# 云环境临时运行库，用户操作数据存在这里，刷新/重启自动清空
-RUNTIME_DB_PATH = "/tmp/runtime_pmc_aps.db"
 
-# 每次页面加载自动复制模板数据库
-if os.path.exists(DEFAULT_DB_PATH):
-    shutil.copyfile(DEFAULT_DB_PATH, RUNTIME_DB_PATH)
-else:
-    conn_init = sqlite3.connect(RUNTIME_DB_PATH, check_same_thread=False)
-    create_all_tables(conn_init)
-    conn_init.close()
-
-# 统一数据库连接函数，全文所有 sqlite3.connect(DB_PATH,...) 全部替换为 get_db_conn()
-def get_db_conn():
-    return sqlite3.connect(RUNTIME_DB_PATH, check_same_thread=False)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pmc_aps.db")
 
 # ============================================================
 # 工具函数
@@ -57,7 +41,7 @@ def si(v, default=0):
         return default
 
 def get_conn():
-    conn = get_db_conn()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1776,6 +1760,9 @@ def page_report(conn):
                             nxt = conn.execute("""SELECT COUNT(*) as cnt FROM work_order_process
                                                   WHERE main_order_no=? AND process_seq > ?""",
                                                (wo["main_order_no"], wo["process_seq"])).fetchone()
+                            bill = f"SEMI{datetime.now().strftime('%m%d%H%M%S')}"
+                            # 包装工序算成品入库，其余工序算半成品入库
+                            bill_type = "成品入库" if wo["process_name"].strip() == "包装" else "半成品入库"
                             if nxt and nxt["cnt"] == 0:
                                 p = qone(conn, "SELECT name,spec FROM products WHERE code=?", (wo["item_code"],))
                                 pname = p["name"] if p else ""
@@ -1788,12 +1775,17 @@ def page_report(conn):
                                 conn.execute("INSERT INTO fg_io(product_code,product_name,spec,out_qty,in_qty,balance,remark,created_at) VALUES(?,?,?,?,?,?,?,?)",
                                              (wo["item_code"], pname, pspec, 0, rqty, new_bal,
                                               f"工单{wo['main_order_no']}{wo['process_name']}完工", now_str()))
-                            else:
-                                bill = f"SEMI{datetime.now().strftime('%m%d%H%M%S')}"
+                                # 最后一道工序同样写入报工流水，否则看板“今日报工量/各工序报工”统计不到
                                 conn.execute("""INSERT INTO semi_product_io(bill_no,bill_type,item_code,process_code,process_name,
                                                 source_order_no,qty,operator,operate_time,remark)
                                                 VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                                             (bill, "半成品入库", wo["item_code"], wo["process_code"] or "",
+                                             (bill, bill_type, wo["item_code"], wo["process_code"] or "",
+                                              wo["process_name"], wo["main_order_no"], rqty, roper, now_str(), rrmk))
+                            else:
+                                conn.execute("""INSERT INTO semi_product_io(bill_no,bill_type,item_code,process_code,process_name,
+                                                source_order_no,qty,operator,operate_time,remark)
+                                                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                                             (bill, bill_type, wo["item_code"], wo["process_code"] or "",
                                               wo["process_name"], wo["main_order_no"], rqty, roper, now_str(), rrmk))
                                 stk = qone(conn, "SELECT * FROM semi_product_stock WHERE item_code=? AND process_code=?",
                                            (wo["item_code"], wo["process_code"] or ""))
@@ -2025,7 +2017,7 @@ def page_settings(conn):
         with cc1:
             st.markdown("**① 下载备份**")
             st.download_button("⬇ 下载整库备份(.db)", backup_db_bytes(),
-                               file_name=f"AIPA整库备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                               file_name=f"宸赋整库备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
                                key="dl_db")
         with cc2:
             st.markdown("**② 上传恢复**")
@@ -2048,7 +2040,7 @@ def page_settings(conn):
         with cc3:
             st.markdown("**① 下载基础资料模板/备份**")
             st.download_button("⬇ 下载基础资料(Excel)", backup_master_excel(conn),
-                               file_name=f"AIPA基础资料_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                               file_name=f"宸赋基础资料_{datetime.now().strftime('%Y%m%d')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                key="dl_master")
         with cc4:
@@ -2081,36 +2073,76 @@ def page_dashboard(conn):
     finished = qone(conn, "SELECT COUNT(*) as c FROM work_order_process WHERE sub_status='已完工'")["c"]
     warn_red = qone(conn, "SELECT COUNT(*) as c FROM orders WHERE warn_level='红色预警'")["c"]
     warn_yellow = qone(conn, "SELECT COUNT(*) as c FROM orders WHERE warn_level='黄色预警'")["c"]
-    today_report = qone(conn, "SELECT COALESCE(SUM(qty),0) as s FROM semi_product_io WHERE date(operate_time)=date('now')")["s"]
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    # 今日报工统计（本地日期，TRIM兼容历史带空格类型）
+    _today = today_str()
+    today_report = qone(conn, "SELECT COALESCE(SUM(qty),0) as s FROM semi_product_io WHERE date(operate_time)=?", (_today,))["s"]
+    today_semi = qone(conn, "SELECT COALESCE(SUM(qty),0) as s FROM semi_product_io WHERE date(operate_time)=? AND TRIM(IFNULL(bill_type,''))='半成品入库'", (_today,))["s"]
+    today_fg = qone(conn, "SELECT COALESCE(SUM(qty),0) as s FROM semi_product_io WHERE date(operate_time)=? AND TRIM(IFNULL(bill_type,''))='成品入库'", (_today,))["s"]
+    today_diff = float(today_report or 0) - (float(today_semi or 0) + float(today_fg or 0))
+
+    # 顶部全部用标准仪表卡片显示
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
     c1.metric("总工单数", total_orders)
     c2.metric("待排产", pending, delta=f"已排产 {scheduled}")
     c3.metric("生产中工序", in_prod)
     c4.metric("已完工工序", finished)
     c5.metric("交期预警", warn_red + warn_yellow, delta=f"红{warn_red}/黄{warn_yellow}", delta_color="inverse")
-    c6.metric("今日报工量", today_report)
+    c6.metric("今日总报工", f"{float(today_report or 0):g}")
+    c7.metric("今日半成品", f"{float(today_semi or 0):g}")
+    c8.metric("今日成品", f"{float(today_fg or 0):g}")
+    c9.metric("今日差额", f"{today_diff:g}",
+              delta_color="inverse" if abs(today_diff) > 0.0001 else "normal")
 
-    st.markdown("---")
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.markdown("#### 订单状态分布")
+    st.divider()
+
+    # 三个表格并排一行：今日各工序报工 | 订单状态分布 | 各工序工单数量
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.subheader("今日各工序报工")
+        today_proc = pd.read_sql("""SELECT process_name as 工序, SUM(qty) as 今日报工数, COUNT(*) as 报工笔数
+                                    FROM semi_product_io WHERE date(operate_time)=?
+                                    GROUP BY process_name ORDER BY 今日报工数 DESC""",
+                                    conn, params=(_today,))
+        if today_proc.empty:
+            st.info("今日暂无报工记录")
+        else:
+            st.dataframe(today_proc, width="stretch", hide_index=True, height=200)
+    with col_b:
+        st.subheader("订单状态分布")
         status_df = pd.read_sql("SELECT status as 状态, COUNT(*) as 数量 FROM orders GROUP BY status ORDER BY 数量 DESC", conn)
         if status_df.empty:
             st.info("暂无订单数据")
         else:
-            st.bar_chart(status_df.set_index("状态"), width="stretch", color="#4A90D9")
-    with col_right:
-        st.markdown("#### 各工序工单数量")
+            st.dataframe(status_df, width="stretch", hide_index=True, height=200)
+    with col_c:
+        st.subheader("各工序工单数量")
         proc_df = pd.read_sql("""SELECT process_name as 工序, COUNT(*) as 工单数
                                  FROM work_order_process GROUP BY process_name ORDER BY 工单数 DESC""", conn)
         if proc_df.empty:
             st.info("暂无工序工单")
         else:
-            st.bar_chart(proc_df.set_index("工序")[["工单数"]], width="stretch", color="#52C41A")
+            st.dataframe(proc_df, width="stretch", hide_index=True, height=200)
 
-    st.markdown("---")
-    st.markdown("#### 交期预警订单")
+    # 累计报工类型分布（对账用，默认折叠省空间）
+    with st.expander("累计报工类型分布（对账用）", expanded=False):
+        type_df = pd.read_sql("""SELECT IFNULL(bill_type,'(空值)') as 单据类型,
+                                 COUNT(*) as 笔数, SUM(qty) as 数量合计
+                                 FROM semi_product_io GROUP BY bill_type ORDER BY 数量合计 DESC""", conn)
+        if type_df.empty:
+            st.info("暂无报工流水")
+        else:
+            st.dataframe(type_df, width="stretch", hide_index=True)
+            _tot = float(pd.to_numeric(type_df["数量合计"], errors="coerce").fillna(0).sum())
+            _ok = float(type_df.loc[type_df["单据类型"].isin(["半成品入库", "成品入库"]),
+                         "数量合计"].apply(pd.to_numeric, errors="coerce").fillna(0).sum())
+            if abs(_tot - _ok) > 0.0001:
+                st.warning(f"存在异常类型：总报工 {_tot:g}，半成品+成品 {_ok:g}，差 {_tot-_ok:g}。请运行 fix_bill_type.py 归一化历史数据")
+            else:
+                st.success(f"对账一致：总报工 {_tot:g} = 半成品 + 成品")
+
+    st.divider()
+    st.subheader("交期预警订单")
     warn_df = pd.read_sql("""SELECT order_no as 工单号,item_code as 品号,item_name as 品名,
                              need_qty as 需生产数,expect_finish_time as 预计完工,
                              plan_end_date as 计划结束,warn_level as 预警,status as 状态
@@ -2125,10 +2157,10 @@ def page_dashboard(conn):
             if row.get("预警") == "黄色预警":
                 return ["background-color: #FFF3CD"] * len(row)
             return [""] * len(row)
-        st.dataframe(warn_df.style.apply(warn_color, axis=1), width="stretch", hide_index=True)
+        st.dataframe(warn_df.style.apply(warn_color, axis=1), width="stretch", hide_index=True, height=220)
 
-    st.markdown("---")
-    st.markdown("#### 近期排产计划")
+    st.divider()
+    st.subheader("近期排产计划")
     sched_df = pd.read_sql("""SELECT o.order_no as 工单号,o.item_code as 品号,o.item_name as 品名,
                               s.process_name as 工序,s.machine_code as 机台,s.plan_start as 计划开始,
                               s.plan_end as 计划结束,s.schedule_cycle as "周期(班)",o.warn_level as 预警
@@ -2137,52 +2169,48 @@ def page_dashboard(conn):
     if sched_df.empty:
         st.info("暂无排产计划，请先在订单管理中排产")
     else:
-        st.dataframe(sched_df, width="stretch", hide_index=True)
+        st.dataframe(sched_df, width="stretch", hide_index=True, height=220)
 
-    st.markdown("---")
-    # 物料库存概览（剩余数），低于安全库存红色高亮
-    st.markdown("#### 物料库存概览（剩余数）")
-    mat_df = pd.read_sql("""SELECT code as 物料编号,name as 名称,mtype as 类型,IFNULL(unit,'') as 单位,
-                            stock_qty as 当前库存,safe_stock as 安全库存
-                            FROM materials ORDER BY code""", conn)
-    if mat_df.empty:
-        st.info("暂无物料库存")
-    else:
-        mk1, mk2 = st.columns(2)
-        mk1.metric("物料种类", len(mat_df))
-        _cur = pd.to_numeric(mat_df["当前库存"], errors="coerce").fillna(0)
-        _safe = pd.to_numeric(mat_df["安全库存"], errors="coerce").fillna(0)
-        low_n = int((_cur <= _safe).sum())
-        mk2.metric("低于安全库存", low_n, delta="需补料" if low_n else "充足",
-                   delta_color="inverse" if low_n else "normal")
-        def _mat_light(row):
-            try:
-                if float(row["当前库存"] or 0) <= float(row["安全库存"] or 0):
-                    return ["background-color:#FFD6D6"] * len(row)
-            except Exception:
-                pass
-            return [""] * len(row)
-        show_mat = fmt_stock_by_unit(mat_df)
-        st.dataframe(show_mat.style.apply(_mat_light, axis=1), width="stretch", hide_index=True)
-
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### 半成品库存概览")
+    st.divider()
+    st.subheader("库存概览")
+    mk1, mk2, mk3 = st.columns(3)
+    with mk1:
+        st.markdown("**物料库存（低于安全库存标红）**")
+        mat_df = pd.read_sql("""SELECT code as 物料编号,name as 名称,mtype as 类型,IFNULL(unit,'') as 单位,
+                                stock_qty as 当前库存,safe_stock as 安全库存
+                                FROM materials ORDER BY code""", conn)
+        if mat_df.empty:
+            st.info("暂无物料")
+        else:
+            _cur = pd.to_numeric(mat_df["当前库存"], errors="coerce").fillna(0)
+            _safe = pd.to_numeric(mat_df["安全库存"], errors="coerce").fillna(0)
+            low_n = int((_cur <= _safe).sum())
+            st.caption(f"物料种类:{len(mat_df)}  需补料:{low_n}")
+            def _mat_light(row):
+                try:
+                    if float(row["当前库存"] or 0) <= float(row["安全库存"] or 0):
+                        return ["background-color:#FFD6D6"] * len(row)
+                except Exception:
+                    pass
+                return [""] * len(row)
+            show_mat = fmt_stock_by_unit(mat_df)
+            st.dataframe(show_mat.style.apply(_mat_light, axis=1), width="stretch", hide_index=True, height=260)
+    with mk2:
+        st.markdown("**半成品库存**")
         semi_df = pd.read_sql("""SELECT process_name as 工序, SUM(current_qty) as 当前库存
                                  FROM semi_product_stock GROUP BY process_name ORDER BY 当前库存 DESC""", conn)
         if semi_df.empty:
             st.info("暂无半成品库存")
         else:
-            st.dataframe(semi_df, width="stretch", hide_index=True)
-    with c2:
-        st.markdown("#### 成品库存概览")
+            st.dataframe(semi_df, width="stretch", hide_index=True, height=260)
+    with mk3:
+        st.markdown("**成品库存TOP10**")
         fg_df = pd.read_sql("""SELECT product_code as 品号,product_name as 品名,stock_qty as 库存数
                                FROM fg_inventory ORDER BY stock_qty DESC LIMIT 10""", conn)
         if fg_df.empty:
             st.info("暂无成品库存")
         else:
-            st.dataframe(fg_df, width="stretch", hide_index=True)
+            st.dataframe(fg_df, width="stretch", hide_index=True, height=260)
 
 # ============================================================
 # 登录界面
