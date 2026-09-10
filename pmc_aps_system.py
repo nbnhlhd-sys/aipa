@@ -167,7 +167,19 @@ def push_db_to_github(token, owner, repo, branch, file_path, db_bytes, commit_ms
 
 
 def get_github_config():
-    """统一读取 GitHub 写回配置（来自 Streamlit Secrets），未配置返回 None"""
+    """统一读取 GitHub 写回配置：优先用网页临时填写的（session_state），再读 Streamlit Secrets，未配置返回 None"""
+    # 1) 网页里临时填写的配置（本次会话有效）
+    if st.session_state.get("gh_token") and st.session_state.get("gh_repo"):
+        try:
+            owner, repo_name = st.session_state["gh_repo"].split("/", 1)
+            if owner and repo_name:
+                return (owner, repo_name,
+                        st.session_state.get("gh_branch", "main"),
+                        st.session_state.get("gh_db_path", "default.db"),
+                        st.session_state["gh_token"])
+        except Exception:
+            pass
+    # 2) Streamlit Secrets 永久配置
     try:
         token = st.secrets["GITHUB_TOKEN"]
         repo = st.secrets["GITHUB_REPO"]
@@ -2261,9 +2273,29 @@ def page_settings(conn):
                     else:
                         st.error("连接有问题，按上面提示修正 Secrets")
         except Exception as e:
-            st.warning("未配置 GitHub 写回权限。请在 Streamlit Cloud → Settings → Secrets 里添加：")
-            st.code("GITHUB_TOKEN=你的GitHub个人访问令牌\nGITHUB_REPO=你的用户名/仓库名\nGITHUB_BRANCH=main\nGITHUB_DB_PATH=default.db")
-            st.caption("GitHub个人访问令牌获取：GitHub → Settings → Developer settings → Personal access tokens，勾选 repo 权限。")
+            st.warning("未配置 GitHub 写回权限。请在下面填写（本次会话有效），或去 Streamlit Cloud → Settings → Secrets 永久配置：")
+            with st.form("gh_config_form", clear_on_submit=False):
+                gc1, gc2 = st.columns(2)
+                _tmp_token = gc1.text_input("GitHub Token", type="password",
+                                            placeholder="ghp_xxxxxxxxxxxx，勾选repo权限")
+                _tmp_repo = gc2.text_input("仓库（用户名/仓库名）",
+                                           placeholder="例如 nbnhlhd-sys/aps-web")
+                gc3, gc4 = st.columns(2)
+                _tmp_branch = gc3.text_input("分支", value="main")
+                _tmp_db = gc4.text_input("数据库文件名", value="default.db")
+                if st.form_submit_button("保存配置（本次会话有效）", type="primary"):
+                    if _tmp_token and "/" in _tmp_repo:
+                        st.session_state["gh_token"] = _tmp_token
+                        st.session_state["gh_repo"] = _tmp_repo
+                        st.session_state["gh_branch"] = _tmp_branch
+                        st.session_state["gh_db_path"] = _tmp_db
+                        st.success("配置已保存，正在刷新...")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error("Token 和仓库必填，仓库格式必须是 用户名/仓库名")
+            st.caption("GitHub Token 获取：GitHub → Settings → Developer settings → Personal access tokens，勾选 repo 权限。")
+            st.caption("想永久保存不用每次重填：把上面4项写到 Streamlit Cloud → Settings → Secrets 里。")
 
         st.markdown("---")
         st.markdown("##### 方式一：整库备份 / 恢复（推荐，完整无损）")
