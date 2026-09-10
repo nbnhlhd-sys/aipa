@@ -2525,11 +2525,41 @@ def login_page(conn):
                         st.session_state.user_role = user["role"] or "查看员"
                         st.session_state.user_workshop = user["workshop"] or ""
                         st.query_params["user"] = user["username"]
+                        # 登录后如果配置了GitHub，立即从云端同步最新数据
+                        _cfg = get_github_config()
+                        if _cfg:
+                            _o, _r, _b, _p, _t = _cfg
+                            _data, _ = pull_db_from_github(_t, _o, _r, _b, _p)
+                            if _data is not None:
+                                try:
+                                    restore_db_file(conn, _data)
+                                except Exception:
+                                    pass
                         st.success("登录成功")
                         st.rerun()
                     else:
                         st.error("用户名或密码错误")
         st.caption("默认管理员：admin / 123456")
+
+        with st.expander("GitHub 云端配置（关闭网页重开后，填这里可恢复数据）"):
+            st.caption("数据存在 GitHub 上时，关闭网页重开后先在这里填一次配置，登录后自动恢复最新数据。")
+            with st.form("gh_login_form", clear_on_submit=False):
+                gl1, gl2 = st.columns(2)
+                _lt = gl1.text_input("GitHub Token", type="password", key="login_gh_token")
+                _lr = gl2.text_input("仓库(用户名/仓库名)", key="login_gh_repo",
+                                     placeholder="nbnhlhd-sys/aps-web")
+                gl3, gl4 = st.columns(2)
+                _lb = gl3.text_input("分支", value="main", key="login_gh_branch")
+                _ld = gl4.text_input("数据库文件名", value="default.db", key="login_gh_db")
+                if st.form_submit_button("保存GitHub配置"):
+                    if _lt and "/" in _lr:
+                        st.session_state["gh_token"] = _lt
+                        st.session_state["gh_repo"] = _lr
+                        st.session_state["gh_branch"] = _lb
+                        st.session_state["gh_db_path"] = _ld
+                        st.success("配置已保存，点登录后自动恢复数据")
+                    else:
+                        st.error("Token 和仓库必填，仓库格式为 用户名/仓库名")
 
 # ============================================================
 # 主函数
